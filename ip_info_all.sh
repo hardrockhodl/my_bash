@@ -4,6 +4,8 @@ blue='\033[0;34m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 red='\033[0;31m'
+cyan='\033[0;36m'
+magenta='\033[0;35m'
 default='\033[0m'
 
 hex_to_cidr() {
@@ -30,22 +32,70 @@ hex_to_cidr() {
     echo "$cidr"
 }
 
-print_ip() {
-    local interface="$1"
-    local ip_address="$2"
-    local cidr="$3"
+class_color() {
+    local ip="$1"
 
-    echo -n "$interface - "
-
-    if [[ $ip_address =~ ^10\. ]]; then
-        echo -e "${blue}${ip_address}/${cidr}${default} (A-class)"
-    elif [[ $ip_address =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
-        echo -e "${green}${ip_address}/${cidr}${default} (B-class)"
-    elif [[ $ip_address =~ ^192\.168\. ]]; then
-        echo -e "${yellow}${ip_address}/${cidr}${default} (C-class)"
+    if [[ $ip =~ ^10\. ]]; then
+        echo "$blue"
+    elif [[ $ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+        echo "$green"
+    elif [[ $ip =~ ^192\.168\. ]]; then
+        echo "$yellow"
     else
-        echo "${ip_address}/${cidr}"
+        echo "$default"
     fi
+}
+
+class_name() {
+    local ip="$1"
+
+    if [[ $ip =~ ^10\. ]]; then
+        echo "A-class"
+    elif [[ $ip =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]]; then
+        echo "B-class"
+    elif [[ $ip =~ ^192\.168\. ]]; then
+        echo "C-class"
+    else
+        echo "Other"
+    fi
+}
+
+get_interface_status() {
+    local interface="$1"
+
+    if ifconfig "$interface" | grep -q "status: active"; then
+        echo "active"
+    elif ifconfig "$interface" | grep -q "status: inactive"; then
+        echo "inactive"
+    else
+        echo "unknown"
+    fi
+}
+
+get_interface_media() {
+    local interface="$1"
+
+    ifconfig "$interface" | awk -F': ' '/media: / {print $2; exit}'
+}
+
+get_ipv4_info() {
+    local interface="$1"
+
+    ifconfig "$interface" | awk '/inet / {print $2, $4}'
+}
+
+get_ipv6_info() {
+    local interface="$1"
+
+    ifconfig "$interface" | awk '/inet6 / && $2 !~ /^fe80::/ {print $2}'
+}
+
+get_default_gateway() {
+    route -n get default 2>/dev/null | awk '/gateway: / {print $2; exit}'
+}
+
+get_default_interface() {
+    route -n get default 2>/dev/null | awk '/interface: / {print $2; exit}'
 }
 
 get_public_ip() {
@@ -70,24 +120,66 @@ get_public_ip() {
 }
 
 echo
-echo "Private IPs:"
+echo "Interfaces:"
 
 for interface in $(ifconfig -l); do
     [[ $interface == lo0* ]] && continue
 
-    while read -r _ ip_address _ netmask_hex _; do
+    status=$(get_interface_status "$interface")
+    media=$(get_interface_media "$interface")
+
+    if [[ $status == "active" ]]; then
+        status_color="$green"
+    elif [[ $status == "inactive" ]]; then
+        status_color="$red"
+    else
+        status_color="$default"
+    fi
+
+    echo -e "${cyan}${interface}${default}"
+    echo -e "  Status: ${status_color}${status}${default}"
+
+    if [[ -n $media ]]; then
+        echo "  Media:  $media"
+    fi
+
+    while read -r ip_address netmask_hex; do
         [[ -z "$ip_address" || -z "$netmask_hex" ]] && continue
 
         cidr=$(hex_to_cidr "$netmask_hex") || cidr="?"
+        ip_color=$(class_color "$ip_address")
+        ip_class=$(class_name "$ip_address")
 
-        print_ip "$interface" "$ip_address" "$cidr"
-    done < <(ifconfig "$interface" | grep 'inet ')
+        echo -e "  IPv4:   ${ip_color}${ip_address}/${cidr}${default} (${ip_class})"
+    done < <(get_ipv4_info "$interface")
+
+    while read -r ipv6_address; do
+        [[ -z "$ipv6_address" ]] && continue
+        echo -e "  IPv6:   ${magenta}${ipv6_address}${default}"
+    done < <(get_ipv6_info "$interface")
+
+    echo
 done
 
+default_gateway=$(get_default_gateway)
+default_interface=$(get_default_interface)
 public_ip=$(get_public_ip)
 
+echo "Routing:"
+if [[ -n $default_gateway ]]; then
+    echo -e "  Default gateway:   ${cyan}${default_gateway}${default}"
+else
+    echo "  Default gateway:   not found"
+fi
+
+if [[ -n $default_interface ]]; then
+    echo -e "  Internet interface: ${cyan}${default_interface}${default}"
+else
+    echo "  Internet interface: not found"
+fi
+
 echo
-if [[ -n "$public_ip" ]]; then
+if [[ -n $public_ip ]]; then
     echo -e "Public IP: ${red}${public_ip}${default}"
 else
     echo -e "Public IP: ${red}Could not determine public IP${default}"
